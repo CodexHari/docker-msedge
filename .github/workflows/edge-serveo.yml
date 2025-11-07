@@ -1,29 +1,37 @@
-name: Remote Edge Browser (Serveo Tunnel)
+name: Edge-in-Brave via Serveo
 
 on:
   workflow_dispatch:
     inputs:
       password:
-        description: 'HTTP Basic Auth password (REQUIRED – will be shown in logs, use a strong one)'
+        description: "HTTP Basic Auth password (strong!)"
         required: true
         type: string
       custom_user:
-        description: 'HTTP Basic Auth username'
+        description: "HTTP Basic Auth username"
         default: edgeuser
         type: string
       subdomain:
-        description: 'Desired subdomain (e.g. mysecretbrowser – leave empty for random)'
+        description: "Desired Serveo subdomain (e.g. myedge) – leave empty for random"
         required: false
         type: string
 
 jobs:
   edge:
     runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6 h max
+
     steps:
+      # -------------------------------------------------
+      # 1. Install autossh (keeps tunnel alive)
+      # -------------------------------------------------
       - name: Install autossh
         run: sudo apt-get update && sudo apt-get install -y autossh
 
-      - name: Start MS Edge container (hardened kiosk)
+      # -------------------------------------------------
+      # 2. Pull & run the msedge container (hardened)
+      # -------------------------------------------------
+      - name: Start MS Edge container (kiosk mode)
         run: |
           docker run -d \
             --name msedge \
@@ -32,34 +40,45 @@ jobs:
             -e TZ=Etc/UTC \
             -e CUSTOM_USER="${{ inputs.custom_user }}" \
             -e PASSWORD="${{ inputs.password }}" \
-            -e HARDEN_DESKTOP=true \        # no terminals, no sudo, no right-click
+            -e HARDEN_DESKTOP=true \
             -e DISABLE_SUDO=true \
             -e DISABLE_TERMINALS=true \
             -e DISABLE_OPEN_TOOLS=true \
-            -e TITLE="Remote Edge (GitHub + Serveo)" \
             -p 3000:3000 \
             -p 3001:3001 \
             -v ${{ runner.temp }}/msedge-config:/config \
-            --shm-size="1gb" \
+            --shm-size=1gb \
             lscr.io/linuxserver/msedge:latest
 
-      - name: Wait for desktop to start
+      # -------------------------------------------------
+      # 3. Wait for the desktop to be ready
+      # -------------------------------------------------
+      - name: Wait for desktop (max 90 s)
         run: |
-          sleep 45
-          docker logs msedge | tail -20
+          for i in $(seq 1 18); do
+            if docker logs msedge 2>&1 | grep -q "Selkies server listening"; then
+              echo "Desktop ready"
+              break
+            fi
+            sleep 5
+          done
+          docker logs msedge | tail -n 30
 
-      - name: Create Serveo tunnel (autossh – stays alive)
+      # -------------------------------------------------
+      # 4. Open Serveo tunnel (autossh → persistent)
+      # -------------------------------------------------
+      - name: Serveo tunnel (HTTPS)
         run: |
           PORT=3000
           if [ -n "${{ inputs.subdomain }}" ]; then
             SUB="-R ${{ inputs.subdomain }}:80:localhost:${PORT}"
-            echo "Requesting specific subdomain: ${{ inputs.subdomain }}.serveo.net"
+            echo "Requesting fixed subdomain: ${{ inputs.subdomain }}.serveo.net"
           else
             SUB="-R 80:localhost:${PORT}"
-            echo "No subdomain requested – Serveo will assign a random one"
+            echo "Random subdomain will be assigned"
           fi
 
-          echo "=== STARTING TUNNEL – LOOK FOR THE HTTPS URL BELOW ==="
+          echo "=== TUNNEL START – look for the HTTPS URL below ==="
           autossh -M 0 \
             -o "ServerAliveInterval 30" \
             -o "ServerAliveCountMax 3" \
