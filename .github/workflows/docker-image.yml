@@ -28,55 +28,58 @@ jobs:
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          echo "Tailscale installed successfully."
+          echo "Tailscale installed."
 
       # -------------------------------------------------
-      # 2. Fetch Auth Key & Authenticate (with retries)
+      # 2. Start tailscaled + Authenticate
       # -------------------------------------------------
-      - name: Fetch Auth Key & Start Tailscale
+      - name: Start tailscaled & Authenticate
         run: |
-          # Fetch the auth key from your endpoint
-          echo "Fetching auth key from https://sparkling-dew-5078.hacknomatrix.workers.dev/..."
+          # Start the daemon
+          echo "Starting tailscaled..."
+          sudo systemctl start tailscaled
+          sleep 5
+
+          # Fetch auth key
+          echo "Fetching auth key..."
           AUTHKEY=$(curl -s https://sparkling-dew-5078.hacknomatrix.workers.dev/)
-          echo "Auth key fetched (first 20 chars): ${AUTHKEY:0:20}..."  # Partial log for debug
-          
-          if [ -z "$AUTHKEY" ] || [ "$AUTHKEY" = "null" ]; then
-            echo "ERROR: Empty or invalid auth key!"
+          echo "Key: ${AUTHKEY:0:20}..."
+
+          if [ -z "$AUTHKEY" ] || [[ "$AUTHKEY" == "null" ]]; then
+            echo "ERROR: Invalid auth key"
             exit 1
           fi
 
-          # Start Tailscale with retries
-          for attempt in {1..3}; do
-            echo "Auth attempt $attempt/3..."
+          # Authenticate with retry
+          for i in {1..3}; do
+            echo "Auth attempt $i..."
             sudo tailscale up \
               --authkey="$AUTHKEY" \
               --accept-dns=false \
               --accept-routes \
               --advertise-exit-node \
-              --hostname=github-edge-${{ github.run_id }} \
-              --quiet  # Suppress interactive prompts
-            if [ $? -eq 0 ]; then
-              echo "✅ Tailscale authenticated!"
+              --hostname="github-edge-${{ github.run_id }}" \
+              --force-reauth || true
+
+            # Check if connected
+            if tailscale status | grep -q "logged in"; then
+              echo "Tailscale connected!"
               break
             fi
-            echo "Attempt $attempt failed, retrying in 10s..."
             sleep 10
           done
 
-          # Verify connection
-          echo "Tailscale status:"
+          # Final check
           tailscale status
-          echo "Tailscale IP:"
-          tailscale ip --4
           TS_IP=$(tailscale ip --4 | head -n1)
+          echo "IP: $TS_IP"
           if [ -z "$TS_IP" ]; then
-            echo "ERROR: No Tailscale IP assigned!"
+            echo "ERROR: No IP"
             exit 1
           fi
-          echo "✅ Tailscale ready with IP: $TS_IP"
 
       # -------------------------------------------------
-      # 3. Start MS Edge Container
+      # 3. Start MS Edge
       # -------------------------------------------------
       - name: Start MS Edge Container
         run: |
@@ -95,75 +98,39 @@ jobs:
             -v ${{ runner.temp }}/config:/config \
             --shm-size=1gb \
             lscr.io/linuxserver/msedge:latest
-          echo "Edge container started."
 
       # -------------------------------------------------
-      # 4. Wait for Edge to be Ready
+      # 4. Wait for Edge
       # -------------------------------------------------
       - name: Wait for Edge
         run: |
-          echo "Waiting for Edge desktop..."
           for i in {1..30}; do
             if docker logs msedge 2>&1 | grep -q "Selkies server listening"; then
-              echo "✅ Edge ready!"
+              echo "Edge ready!"
               break
             fi
-            echo "Waiting... ($i/30)"
             sleep 5
           done
-          echo "Edge logs (last 10 lines):"
-          docker logs msedge | tail -n 10
 
       # -------------------------------------------------
-      # 5. Enable Tailscale Funnel (HTTPS)
+      # 5. Enable Funnel
       # -------------------------------------------------
       - name: Enable Tailscale Funnel
         run: |
-          # Extra wait for Tailscale stability
-          sleep 20
-          
-          # Verify Tailscale is up
-          until tailscale status > /dev/null 2>&1; do
-            echo "Stabilizing Tailscale..."
-            sleep 5
-          done
-          
-          TS_IP=$(tailscale ip --4 | head -n1)
-          echo "Current Tailscale IP: $TS_IP"
-
-          # Enable Funnel: HTTPS on 443 → localhost:3000 (Edge)
-          echo "Enabling Funnel..."
+          sleep 15
           sudo tailscale funnel --bg --https=443:localhost:3000
-          
-          # Wait for Funnel to activate (poll status)
-          for i in {1..12}; do  # 60s max
-            if sudo tailscale funnel status | grep -q "running"; then
-              echo "✅ Funnel active!"
-              break
-            fi
-            echo "Funnel warming up... ($i/12)"
-            sleep 5
-          done
+          sleep 15
 
           echo ""
           echo "=================================="
-          echo "   🎉 PRIVATE EDGE BROWSER READY!"
-          echo ""
-          echo "   URL: https://${{ inputs.subdomain }}.browser.tools"
-          echo "   Username: ${{ inputs.custom_user }}"
-          echo "   Password: [the one you entered]"
-          echo ""
-          echo "   📱 Scan QR for mobile:"
-          echo "   (Add this step if you want QR generation)"
-          echo ""
-          echo "   ⚠️  Only accessible from your Tailscale devices!"
-          echo "   🔒 No public exposure. Dies after ~6h."
+          echo "   PRIVATE BROWSER READY!"
+          echo "   https://${{ inputs.subdomain }}.browser.tools"
+          echo "   Login: ${{ inputs.custom_user }} / [your password]"
+          echo "   Only on Tailscale devices!"
           echo "=================================="
 
       # -------------------------------------------------
-      # 6. Keep Session Alive
+      # 6. Keep Alive
       # -------------------------------------------------
-      - name: Keep Alive (6 hours)
-        run: |
-          echo "Session active. Re-run workflow for a fresh one."
-          sleep 21600  # 6 hours
+      - name: Keep Alive
+        run: sleep 21600
