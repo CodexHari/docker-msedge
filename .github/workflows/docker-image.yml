@@ -22,10 +22,20 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install Tailscale
+      - name: Install & Authenticate Tailscale
+        env:
+          AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --advertise-tags=tag:github
+          sudo tailscale up \
+            --authkey=$AUTHKEY \
+            --accept-dns=false \
+            --accept-routes \
+            --advertise-exit-node \
+            --hostname=github-edge-${{ github.run_id }}
+
+          echo "Tailscale IP:"
+          tailscale ip --4
 
       - name: Start MS Edge Container
         run: |
@@ -48,35 +58,27 @@ jobs:
         run: |
           for i in {1..30}; do
             if docker logs msedge 2>&1 | grep -q "Selkies server listening"; then
-              echo "Edge is ready!"
+              echo "Edge ready!"
               break
             fi
             sleep 5
           done
 
-      - name: Enable Tailscale Funnel + Custom Domain
-        env:
-          SUBDOMAIN: ${{ inputs.subdomain }}
+      - name: Enable Tailscale Funnel (HTTPS)
         run: |
-          # Get Tailscale IP
+          sleep 10
+          until tailscale status > /dev/null 2>&1; do sleep 5; done
           TS_IP=$(tailscale ip --4 | head -n1)
           echo "Tailscale IP: $TS_IP"
-
-          # Enable Funnel (only for HTTPS)
           sudo tailscale funnel --bg --https=443:localhost:3000
-
-          # Wait for Funnel to be active
-          sleep 10
+          sleep 15
 
           echo ""
           echo "=================================="
-          echo "   ACCESS YOUR BROWSER:"
-          echo "   https://$SUBDOMAIN.browser.tools"
+          echo "   ACCESS: https://${{ inputs.subdomain }}.browser.tools"
           echo "   Username: ${{ inputs.custom_user }}"
-          echo "   Password: [your input]"
+          echo "   Password: [hidden]"
           echo "=================================="
-          echo ""
-          echo "Only works on devices in your Tailnet!"
 
-      - name: Keep Alive (6 hours)
-        run: sleep 21600  # 6 hours
+      - name: Keep Alive
+        run: sleep 21600
