@@ -1,0 +1,82 @@
+name: Edge via Tailscale (Private Domain)
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: "HTTP Basic Auth password"
+        required: true
+        type: string
+      custom_user:
+        description: "Username"
+        default: edgeuser
+        type: string
+      subdomain:
+        description: "Subdomain (e.g. edge)"
+        default: edge
+        type: string
+
+jobs:
+  edge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --advertise-tags=tag:github
+
+      - name: Start MS Edge Container
+        run: |
+          docker run -d \
+            --name msedge \
+            -e PUID=1000 \
+            -e PGID=1000 \
+            -e TZ=Etc/UTC \
+            -e CUSTOM_USER="${{ inputs.custom_user }}" \
+            -e PASSWORD="${{ inputs.password }}" \
+            -e HARDEN_DESKTOP=true \
+            -e DISABLE_SUDO=true \
+            -e DISABLE_TERMINALS=true \
+            -p 3000:3000 \
+            -v ${{ runner.temp }}/config:/config \
+            --shm-size=1gb \
+            lscr.io/linuxserver/msedge:latest
+
+      - name: Wait for Edge
+        run: |
+          for i in {1..30}; do
+            if docker logs msedge 2>&1 | grep -q "Selkies server listening"; then
+              echo "Edge is ready!"
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Enable Tailscale Funnel + Custom Domain
+        env:
+          SUBDOMAIN: ${{ inputs.subdomain }}
+        run: |
+          # Get Tailscale IP
+          TS_IP=$(tailscale ip --4 | head -n1)
+          echo "Tailscale IP: $TS_IP"
+
+          # Enable Funnel (only for HTTPS)
+          sudo tailscale funnel --bg --https=443:localhost:3000
+
+          # Wait for Funnel to be active
+          sleep 10
+
+          echo ""
+          echo "=================================="
+          echo "   ACCESS YOUR BROWSER:"
+          echo "   https://$SUBDOMAIN.browser.tools"
+          echo "   Username: ${{ inputs.custom_user }}"
+          echo "   Password: [your input]"
+          echo "=================================="
+          echo ""
+          echo "Only works on devices in your Tailnet!"
+
+      - name: Keep Alive (6 hours)
+        run: sleep 21600  # 6 hours
