@@ -1,0 +1,69 @@
+name: Remote Edge Browser (Serveo Tunnel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: 'HTTP Basic Auth password (REQUIRED – will be shown in logs, use a strong one)'
+        required: true
+        type: string
+      custom_user:
+        description: 'HTTP Basic Auth username'
+        default: edgeuser
+        type: string
+      subdomain:
+        description: 'Desired subdomain (e.g. mysecretbrowser – leave empty for random)'
+        required: false
+        type: string
+
+jobs:
+  edge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install autossh
+        run: sudo apt-get update && sudo apt-get install -y autossh
+
+      - name: Start MS Edge container (hardened kiosk)
+        run: |
+          docker run -d \
+            --name msedge \
+            -e PUID=1000 \
+            -e PGID=1000 \
+            -e TZ=Etc/UTC \
+            -e CUSTOM_USER="${{ inputs.custom_user }}" \
+            -e PASSWORD="${{ inputs.password }}" \
+            -e HARDEN_DESKTOP=true \        # no terminals, no sudo, no right-click
+            -e DISABLE_SUDO=true \
+            -e DISABLE_TERMINALS=true \
+            -e DISABLE_OPEN_TOOLS=true \
+            -e TITLE="Remote Edge (GitHub + Serveo)" \
+            -p 3000:3000 \
+            -p 3001:3001 \
+            -v ${{ runner.temp }}/msedge-config:/config \
+            --shm-size="1gb" \
+            lscr.io/linuxserver/msedge:latest
+
+      - name: Wait for desktop to start
+        run: |
+          sleep 45
+          docker logs msedge | tail -20
+
+      - name: Create Serveo tunnel (autossh – stays alive)
+        run: |
+          PORT=3000
+          if [ -n "${{ inputs.subdomain }}" ]; then
+            SUB="-R ${{ inputs.subdomain }}:80:localhost:${PORT}"
+            echo "Requesting specific subdomain: ${{ inputs.subdomain }}.serveo.net"
+          else
+            SUB="-R 80:localhost:${PORT}"
+            echo "No subdomain requested – Serveo will assign a random one"
+          fi
+
+          echo "=== STARTING TUNNEL – LOOK FOR THE HTTPS URL BELOW ==="
+          autossh -M 0 \
+            -o "ServerAliveInterval 30" \
+            -o "ServerAliveCountMax 3" \
+            -o "StrictHostKeyChecking no" \
+            -o "ExitOnForwardFailure yes" \
+            $SUB \
+            serveo.net
