@@ -1,0 +1,124 @@
+name: Download and fff Large File
+
+# Manually triggered from the Actions tab. Handles 5GB+ files.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Direct download URL of the file"
+        required: true
+        type: string
+      filename:
+        description: "Output filename (optional; auto-detected if empty)"
+        required: false
+        type: string
+      downloader:
+        description: "Downloader to use"
+        required: false
+        default: "aria2c"
+        type: choice
+        options: [aria2c, wget]
+      service:
+        description: "Where to upload (all support 5GB+)"
+        required: false
+        default: "gofile"
+        type: choice
+        options:
+          - gofile      # ~unlimited size, throttled free downloads
+          - pixeldrain  # 20GB/file, kept 120d after last download
+          - filebin     # unlimited size, auto-deletes after ~6 days
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      # GitHub runners only have ~14GB free by default. This frees ~25GB more.
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+                      /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Install aria2
+        run: sudo apt-get update && sudo apt-get install -y aria2 jq
+
+      - name: Download file
+        id: download
+        run: |
+          set -euo pipefail
+          mkdir -p downloads
+          URL="${{ inputs.url }}"
+          NAME="${{ inputs.filename }}"
+
+          if [ -z "$NAME" ]; then NAME="$(basename "${URL%%\?*}")"; fi
+          if [ -z "$NAME" ] || [ "$NAME" = "/" ]; then NAME="download.bin"; fi
+          echo "Saving as: $NAME"
+
+          if [ "${{ inputs.downloader }}" = "wget" ]; then
+            wget -O "downloads/$NAME" "$URL"
+          else
+            aria2c -x16 -s16 -k1M --file-allocation=none \
+                   --max-tries=5 --retry-wait=5 \
+                   -d downloads -o "$NAME" "$URL"
+          fi
+
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          ls -lh "downloads/$NAME"
+          df -h /
+
+      - name: Upload file
+        id: upload
+        run: |
+          set -euo pipefail
+          FILE="downloads/${{ steps.download.outputs.name }}"
+          NAME="${{ steps.download.outputs.name }}"
+          RESULT=""
+
+          case "${{ inputs.service }}" in
+            gofile)
+              # 1) pick an upload server, 2) POST the file, 3) read downloadPage
+              SERVER="$(curl -sf https://api.gofile.io/servers \
+                        | jq -r '.data.servers[0].name')"
+              echo "Using GoFile server: $SERVER"
+              RESULT="$(curl -sf -F "file=@${FILE}" \
+                        "https://${SERVER}.gofile.io/uploadfile" \
+                        | jq -r '.data.downloadPage')"
+              ;;
+            pixeldrain)
+              ID="$(curl -sf -T "${FILE}" \
+                    "https://pixeldrain.com/api/file/${NAME}" \
+                    | jq -r '.id')"
+              RESULT="https://pixeldrain.com/u/${ID}"
+              ;;
+            filebin)
+              # Random bin id; the share URL is deterministic.
+              BIN="ci-$(date +%s)-$RANDOM"
+              curl -sf -X POST \
+                   -H "Content-Type: application/octet-stream" \
+                   --data-binary "@${FILE}" \
+                   "https://filebin.net/${BIN}/${NAME}" > /dev/null
+              RESULT="https://filebin.net/${BIN}"
+              ;;
+          esac
+
+          RESULT="$(echo "$RESULT" | tr -d '[:space:]')"
+          if [ -z "$RESULT" ] || [ "$RESULT" = "null" ] \
+             || ! echo "$RESULT" | grep -q '^https\?://'; then
+            echo "::error::Upload failed or no URL returned from ${{ inputs.service }}."
+            exit 1
+          fi
+          echo "url=$RESULT" >> "$GITHUB_OUTPUT"
+
+      - name: Show result
+        run: |
+          {
+            echo "### ✅ Upload complete"
+            echo ""
+            echo "**File:** \`${{ steps.download.outputs.name }}\`"
+            echo "**Service:** ${{ inputs.service }}"
+            echo "**URL:** ${{ steps.upload.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Download URL::${{ steps.upload.outputs.url }}"
