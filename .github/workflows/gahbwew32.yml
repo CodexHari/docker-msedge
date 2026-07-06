@@ -1,0 +1,25 @@
+name: brave-kasm
+on:
+  workflow_dispatch:
+
+jobs:
+  brave:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start Brave container
+        run: |
+          docker run -d --name brave --shm-size=512m \
+            -p 6901:6901 -e VNC_PW=password \
+            kasmweb/brave:1.14.0-rolling
+
+      - name: Install cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Open tunnel
+        run: |
+          cloudflared tunnel --url https://localhost:6901 --no-tls-verify
+
+      # Keep-alive: the tunnel command above blocks, so the job stays up
+      # until the 6-hour runner limit or you cancel it manually.
